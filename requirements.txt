@@ -4,3 +4,5 @@ librosa
 soundfile
 noisereduce
 numpy
+requests
+beautifulsoup4
