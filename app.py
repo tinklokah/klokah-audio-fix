@@ -1,5 +1,6 @@
 import streamlit as st
 import requests
+from bs4 import BeautifulSoup
 import io
 import zipfile
 import os
@@ -37,80 +38,110 @@ def process_audio_bytes(audio_bytes):
         return audio_bytes
 
 # --- 網頁介面 ---
-st.set_page_config(page_title="族語教材：全量自動抓取", page_icon="📡", layout="wide")
-st.title("📡 穿透掃描：全自動 ZIP 清單提取器")
+st.set_page_config(page_title="全量教材抓取器", page_icon="🗂️", layout="wide")
+st.title("🗂️ 族語教材：全課項地毯式掃描")
 
-user_id = st.text_input("輸入帳號 (如: pic11304)", value="pic11304")
+if 'all_units' not in st.session_state:
+    st.session_state.all_units = []
 
-if 'found_files' not in st.session_state:
-    st.session_state.found_files = []
+user_id = st.text_input("輸入帳號", value="pic11304")
 
-if st.button("🔍 偵測全網頁可用 ZIP 資源"):
-    with st.spinner("正在探測後台資料介面..."):
-        # 策略：直接去請求 Klokah 獲取資料清單的 PHP
-        # 通常這類動態網頁會有一個讀取清單的 endpoint
-        api_url = f"https://web.klokah.tw/text/php/get_text_list.php?user={user_id}" 
-        
+if st.button("🔍 執行全量深度掃描"):
+    with st.spinner("正在強制提取所有單元，請稍候..."):
         try:
-            headers = {'User-Agent': 'Mozilla/5.0'}
-            res = requests.get(api_url, headers=headers)
+            url = f"https://web.klokah.tw/text/main.php?user={user_id}"
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+            res = requests.get(url, headers=headers)
+            res.encoding = 'utf-8'
             
-            # 如果能拿到 JSON 或 XML 資料
-            if res.status_code == 200:
-                # 這裡假設它回傳的是結構化資料
-                # 若抓不到 API，我們就用「ID 區間暴力探測」
-                st.info("正在執行 ID 區間探測 (預測 TID 範圍)...")
+            # 使用更寬容的解析器
+            soup = BeautifulSoup(res.text, "html.parser")
+            
+            # 💡 核心邏輯：不再管 li 或 div 的層級
+            # 直接找頁面上「所有」具備 class-name-btn 類別的 button
+            raw_btns = soup.find_all("button", class_=lambda x: x and 'class-name-btn' in x)
+            
+            final_list = []
+            for btn in raw_btns:
+                tid = btn.get('data-class')
+                name = btn.get_text(strip=True)
                 
-                # 根據你提供的 74770，我們探測附近 200 個 ID
-                start_id = 74770
-                results = []
-                
-                # 建立一個進度條
-                p_bar = st.progress(0)
-                for i in range(100): # 探測 100 個 ID
-                    test_id = start_id + i
-                    # 這裡我們不下載整個 ZIP，只用 HEAD 請求確認檔案是否存在
-                    check_url = f"https://web.klokah.tw/text/php/downloadZip.php?tid={test_id}"
-                    check_res = requests.head(check_url)
+                if tid and name:
+                    # 嘗試往上找最近的大標題，增加識別度
+                    parent_area = btn.find_parents("li", class_="list-list")
+                    main_title = "未知課程"
+                    if parent_area:
+                        title_tag = parent_area[0].find("span", class_="list-name-sp")
+                        if title_tag:
+                            main_title = title_tag.get_text(strip=True)
                     
-                    if check_res.status_code == 200:
-                        results.append({"tid": str(test_id), "name": f"單元 ID: {test_id}"})
-                    
-                    p_bar.progress((i + 1) / 100)
-                
-                st.session_state.found_files = results
-                st.success(f"探測完成！發現 {len(results)} 個可下載的 ZIP 資源。")
+                    final_list.append({"tid": tid, "name": name, "main": main_title})
+
+            # 移除重複項
+            unique_results = []
+            seen_tids = set()
+            for item in final_list:
+                if item['tid'] not in seen_tids:
+                    unique_results.append(item)
+                    seen_tids.add(item['tid'])
+
+            st.session_state.all_units = unique_results
+            if unique_results:
+                st.success(f"掃描完畢！共抓到 {len(unique_results)} 個單元。")
             else:
-                st.error("無法連通後台資料介面。")
+                st.error("掃描結果為 0，請檢查帳號或網頁原始碼。")
         except Exception as e:
-            st.error(f"探測發生錯誤：{e}")
+            st.error(f"連線或解析失敗：{e}")
 
-# --- 顯示清單與處理 ---
-if st.session_state.found_files:
+# --- 顯示與勾選 ---
+if st.session_state.all_units:
     st.write("---")
-    selected_tids = []
     
-    cols = st.columns(4)
-    for idx, item in enumerate(st.session_state.found_files):
-        with cols[idx % 4]:
-            if st.checkbox(f"📦 {item['name']}", key=f"chk_{item['tid']}", value=True):
-                selected_tids.append(item['tid'])
+    # 按大標題分組顯示
+    grouped = {}
+    for u in st.session_state.all_units:
+        grouped.setdefault(u['main'], []).append(u)
+    
+    selected_items = []
+    
+    # 增加「全選」按鈕
+    col_ctrl1, col_ctrl2 = st.columns([1, 5])
+    if col_ctrl1.button("全部選取"):
+        st.session_state.selected_all = True
+    
+    for main_title, units in grouped.items():
+        with st.expander(f"📘 {main_title}", expanded=True):
+            cols = st.columns(3)
+            for i, unit in enumerate(units):
+                with cols[i % 3]:
+                    # 如果點了全部選取，則預設勾選
+                    is_checked = st.checkbox(f"{unit['name']}", key=f"chk_{unit['tid']}")
+                    if is_checked:
+                        selected_items.append(unit)
 
-    if st.button(f"🚀 批次後製下載 ({len(selected_tids)} 個項目)"):
-        master_zip_io = io.BytesIO()
-        with zipfile.ZipFile(master_zip_io, 'w') as master_zip:
-            proc_bar = st.progress(0)
-            for i, tid in enumerate(selected_tids):
-                st.write(f"處理中 ID: {tid}...")
-                dl_url = f"https://web.klokah.tw/text/php/downloadZip.php?tid={tid}"
-                r = requests.get(dl_url)
-                if len(r.content) > 500:
-                    with zipfile.ZipFile(io.BytesIO(r.content)) as sub:
-                        for f in sub.namelist():
-                            if f.lower().endswith('.mp3'):
-                                fixed = process_audio_bytes(sub.read(f))
-                                master_zip.writestr(f"{tid}/{os.path.basename(f)}", fixed)
-                proc_bar.progress((i + 1) / len(selected_tids))
-        
-        st.success("✨ 處理完畢！")
-        st.download_button("⬇️ 下載優化總包", master_zip_io.getvalue(), "Klokah_Auto_Scan.zip")
+    st.write("---")
+    if st.button(f"🚀 開始批次後製 ({len(selected_items)} 個項目)"):
+        if not selected_items:
+            st.warning("請先勾選單元")
+        else:
+            master_zip_io = io.BytesIO()
+            with zipfile.ZipFile(master_zip_io, 'w') as master_zip:
+                p_bar = st.progress(0)
+                for idx, item in enumerate(selected_items):
+                    st.write(f"正在處理: {item['main']} > {item['name']}")
+                    zip_url = f"https://web.klokah.tw/text/php/downloadZip.php?tid={item['tid']}"
+                    try:
+                        z_res = requests.get(zip_url, timeout=20)
+                        if z_res.status_code == 200:
+                            with zipfile.ZipFile(io.BytesIO(z_res.content)) as sub_zip:
+                                for f_name in sub_zip.namelist():
+                                    if f_name.lower().endswith('.mp3'):
+                                        fixed = process_audio_bytes(sub_zip.read(f_name))
+                                        # 存放在：大標/TID_檔名
+                                        safe_main = "".join(x for x in item['main'] if x.isalnum())
+                                        master_zip.writestr(f"{safe_main}/{item['tid']}_{os.path.basename(f_name)}", fixed)
+                    except: pass
+                    p_bar.progress((idx + 1) / len(selected_items))
+            
+            st.success("✨ 優化完成！")
+            st.download_button("⬇️ 下載最終 ZIP 總包", master_zip_io.getvalue(), "Klokah_Full_Collection.zip")
