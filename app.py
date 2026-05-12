@@ -1,6 +1,5 @@
 import streamlit as st
 import requests
-from bs4 import BeautifulSoup
 import io
 import zipfile
 import os
@@ -38,73 +37,51 @@ def process_audio_bytes(audio_bytes):
         return audio_bytes
 
 # --- 網頁介面 ---
-st.set_page_config(page_title="第一課全量提取", page_icon="⛏️")
-st.title("⛏️ 終極掃描：01梅花般堅強")
+st.set_page_config(page_title="族語教材直接下載器", page_icon="🚀")
+st.title("🚀 繞過掃描：直接 TID 下載後製器")
 
-user_id = st.text_input("輸入帳號", value="pic11304")
+st.info("由於網頁結構可能是動態生成的，我們直接輸入單元 ID (TID) 來進行下載與優化。")
 
-if st.button("🔍 執行地毯式全網頁掃描"):
-    with st.spinner("正在搜尋所有單元 ID..."):
-        try:
-            url = f"https://web.klokah.tw/text/main.php?user={user_id}"
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-            }
-            res = requests.get(url, headers=headers)
-            res.encoding = 'utf-8'
-            
-            # 使用最寬容的解析器
-            soup = BeautifulSoup(res.text, "html.parser")
-            
-            # 1. 暴力搜尋：找出整頁所有帶有 data-class 的 button
-            all_btns = soup.find_all("button", attrs={"data-class": True})
-            
-            lessons = []
-            st.write(f"### 📋 原始按鈕分析 (共找到 {len(all_btns)} 個按鈕)")
-            
-            # 2. 針對我們關心的 ID 範圍進行過濾 (74770 ~ 74775)
-            # 這是你提供的 HTML 中第一課的 ID 範圍
-            target_ids = ["74770", "74771", "74772", "74773", "74774", "74775"]
-            
-            for b in all_btns:
-                tid = b.get('data-class')
-                if tid in target_ids:
-                    # 只有名稱按鈕會包含「數字」開頭（如 01、02...）
-                    name = b.get_text(strip=True)
-                    if name and any(char.isdigit() for char in name[:2]):
-                        # 避免抓到重複的 (因為同 ID 可能有觀看、編輯等按鈕)
-                        if not any(l['tid'] == tid for l in lessons):
-                            st.write(f"📍 找到單元：{name} (TID: {tid})")
-                            lessons.append({"tid": tid, "name": name})
-            
-            st.session_state.target_lessons = lessons
-            
-            if not lessons:
-                st.error("在地毯式搜尋中仍未發現目標單元，可能網頁原始碼被加密或未載入。")
-                # 除錯用：印出前 10 個找到的 data-class
-                st.write("前 5 個找到的 ID 範例：", [btn.get('data-class') for btn in all_btns[:5]])
-                
-        except Exception as e:
-            st.error(f"掃描出錯：{e}")
+# 這裡讓你手動輸入 ID，或者我們預設第一課的 ID
+default_ids = "74770, 74771, 74772, 74773, 74774, 74775"
+tid_input = st.text_area("請輸入要處理的 TID (用逗號隔開)", value=default_ids)
 
-# --- 下載處理 ---
-if 'target_lessons' in st.session_state and st.session_state.target_lessons:
-    if st.button(f"🚀 批次優化這 {len(st.session_state.target_lessons)} 個單元"):
+if st.button("🚀 開始直接抓取並後製"):
+    tids = [t.strip() for t in tid_input.split(",") if t.strip()]
+    
+    if not tids:
+        st.warning("請輸入至少一個 TID")
+    else:
         master_zip_io = io.BytesIO()
+        success_count = 0
+        
         with zipfile.ZipFile(master_zip_io, 'w') as master_zip:
             p_bar = st.progress(0)
-            for idx, item in enumerate(st.session_state.target_lessons):
-                st.write(f"正在處理：{item['name']}")
-                zip_url = f"https://web.klokah.tw/text/php/downloadZip.php?tid={item['tid']}"
+            for idx, tid in enumerate(tids):
+                st.write(f"正在嘗試下載 TID: {tid}...")
+                zip_url = f"https://web.klokah.tw/text/php/downloadZip.php?tid={tid}"
+                
                 try:
-                    z_res = requests.get(zip_url, timeout=20)
-                    with zipfile.ZipFile(io.BytesIO(z_res.content)) as sub_zip:
-                        for f_name in sub_zip.namelist():
-                            if f_name.lower().endswith('.mp3'):
-                                fixed = process_audio_bytes(sub_zip.read(f_name))
-                                master_zip.writestr(f"01_梅花般堅強/{item['tid']}/{os.path.basename(f_name)}", fixed)
-                except: pass
-                p_bar.progress((idx + 1) / len(st.session_state.target_lessons))
+                    # 這裡不抓網頁，直接請求下載 API
+                    res = requests.get(zip_url, timeout=20)
+                    if res.status_code == 200 and len(res.content) > 500: # 確保不是抓到空檔案
+                        with zipfile.ZipFile(io.BytesIO(res.content)) as sub_zip:
+                            for f_name in sub_zip.namelist():
+                                if f_name.lower().endswith('.mp3'):
+                                    fixed = process_audio_bytes(sub_zip.read(f_name))
+                                    # 存放路徑：{TID}/{檔名}
+                                    master_zip.writestr(f"{tid}/{os.path.basename(f_name)}", fixed)
+                        st.write(f"✅ TID {tid} 處理完成")
+                        success_count += 1
+                    else:
+                        st.error(f"❌ TID {tid} 下載失敗 (檔案不存在或權限不足)")
+                except Exception as e:
+                    st.error(f"💥 TID {tid} 發生錯誤: {e}")
+                
+                p_bar.progress((idx + 1) / len(tids))
         
-        st.success("🎉 下載準備就緒！")
-        st.download_button("⬇️ 下載成果", master_zip_io.getvalue(), "Lesson_01_Fixed.zip")
+        if success_count > 0:
+            st.success(f"🎉 全部處理完成！共成功處理 {success_count} 個單元。")
+            st.download_button("⬇️ 下載最終優化包", master_zip_io.getvalue(), "Klokah_Direct_Fixed.zip")
+        else:
+            st.error("沒有任何單元被成功處理，請檢查 TID 是否正確。")
