@@ -1,6 +1,5 @@
 import streamlit as st
 import requests
-from bs4 import BeautifulSoup
 import io
 import zipfile
 import os
@@ -38,110 +37,88 @@ def process_audio_bytes(audio_bytes):
         return audio_bytes
 
 # --- 網頁介面 ---
-st.set_page_config(page_title="全量教材抓取器", page_icon="🗂️", layout="wide")
-st.title("🗂️ 族語教材：全課項地毯式掃描")
+st.set_page_config(page_title="API 級全量抓取器", page_icon="🔗", layout="wide")
+st.title("🔗 API 驅動：族語教材全自動下載優化")
 
-if 'all_units' not in st.session_state:
-    st.session_state.all_units = []
+user_id = st.text_input("輸入帳號 (ID)", value="alp11541")
 
-user_id = st.text_input("輸入帳號", value="pic11304")
+if 'api_units' not in st.session_state:
+    st.session_state.api_units = []
 
-if st.button("🔍 執行全量深度掃描"):
-    with st.spinner("正在強制提取所有單元，請稍候..."):
+if st.button("🚀 從 API 獲取教材清單"):
+    with st.spinner("正在呼叫後台 API..."):
+        # 你提供的 API 網址
+        api_url = f"https://web.klokah.tw/text/php/querrySentence.php?id={user_id}"
+        
         try:
-            url = f"https://web.klokah.tw/text/main.php?user={user_id}"
-            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
-            res = requests.get(url, headers=headers)
-            res.encoding = 'utf-8'
-            
-            # 使用更寬容的解析器
-            soup = BeautifulSoup(res.text, "html.parser")
-            
-            # 💡 核心邏輯：不再管 li 或 div 的層級
-            # 直接找頁面上「所有」具備 class-name-btn 類別的 button
-            raw_btns = soup.find_all("button", class_=lambda x: x and 'class-name-btn' in x)
-            
-            final_list = []
-            for btn in raw_btns:
-                tid = btn.get('data-class')
-                name = btn.get_text(strip=True)
+            res = requests.get(api_url, timeout=15)
+            # 偵測回傳格式 (可能是 JSON 或 XML)
+            if res.status_code == 200:
+                data = res.json() # 假設它是標準 JSON
                 
-                if tid and name:
-                    # 嘗試往上找最近的大標題，增加識別度
-                    parent_area = btn.find_parents("li", class_="list-list")
-                    main_title = "未知課程"
-                    if parent_area:
-                        title_tag = parent_area[0].find("span", class_="list-name-sp")
-                        if title_tag:
-                            main_title = title_tag.get_text(strip=True)
-                    
-                    final_list.append({"tid": tid, "name": name, "main": main_title})
+                # --- 自動解析邏輯 ---
+                # 這裡會根據回傳的 JSON 結構提取 tid。
+                # 假設 JSON 裡面有類似 "tid" 或 "class_id" 的欄位
+                found_items = []
+                
+                # 這是一個遞迴搜尋函數，不管 JSON 有多深，只要看到 tid 就抓
+                def find_tids(obj):
+                    if isinstance(obj, dict):
+                        # 這裡的 key 根據 API 內容調整，常見為 'tid' 或 'id'
+                        tid = obj.get('tid') or obj.get('class_id')
+                        name = obj.get('title') or obj.get('name') or f"單元 {tid}"
+                        if tid:
+                            found_items.append({"tid": str(tid), "name": name})
+                        for v in obj.values():
+                            find_tids(v)
+                    elif isinstance(obj, list):
+                        for item in obj:
+                            find_tids(item)
 
-            # 移除重複項
-            unique_results = []
-            seen_tids = set()
-            for item in final_list:
-                if item['tid'] not in seen_tids:
-                    unique_results.append(item)
-                    seen_tids.add(item['tid'])
-
-            st.session_state.all_units = unique_results
-            if unique_results:
-                st.success(f"掃描完畢！共抓到 {len(unique_results)} 個單元。")
+                find_tids(data)
+                
+                # 去重
+                unique_items = {i['tid']: i for i in found_items}.values()
+                st.session_state.api_units = list(unique_items)
+                
+                if st.session_state.api_units:
+                    st.success(f"✅ 成功！API 回傳了 {len(st.session_state.api_units)} 個單元。")
+                else:
+                    st.warning("API 連通了，但裡面沒找到單元 ID。請檢查 API 回傳的內容。")
+                    st.write("DEBUG (API 內容):", data) # 顯示出來讓我們看結構
             else:
-                st.error("掃描結果為 0，請檢查帳號或網頁原始碼。")
+                st.error(f"API 呼叫失敗，狀態碼：{res.status_code}")
         except Exception as e:
-            st.error(f"連線或解析失敗：{e}")
+            st.error(f"發生錯誤：{e}")
 
-# --- 顯示與勾選 ---
-if st.session_state.all_units:
+# --- 批次處理 ---
+if st.session_state.api_units:
     st.write("---")
+    selected_tids = []
     
-    # 按大標題分組顯示
-    grouped = {}
-    for u in st.session_state.all_units:
-        grouped.setdefault(u['main'], []).append(u)
-    
-    selected_items = []
-    
-    # 增加「全選」按鈕
-    col_ctrl1, col_ctrl2 = st.columns([1, 5])
-    if col_ctrl1.button("全部選取"):
-        st.session_state.selected_all = True
-    
-    for main_title, units in grouped.items():
-        with st.expander(f"📘 {main_title}", expanded=True):
-            cols = st.columns(3)
-            for i, unit in enumerate(units):
-                with cols[i % 3]:
-                    # 如果點了全部選取，則預設勾選
-                    is_checked = st.checkbox(f"{unit['name']}", key=f"chk_{unit['tid']}")
-                    if is_checked:
-                        selected_items.append(unit)
+    cols = st.columns(3)
+    for idx, item in enumerate(st.session_state.api_units):
+        with cols[idx % 3]:
+            if st.checkbox(f"📦 {item['name']} (TID: {item['tid']})", key=f"api_{item['tid']}", value=True):
+                selected_tids.append(item)
 
-    st.write("---")
-    if st.button(f"🚀 開始批次後製 ({len(selected_items)} 個項目)"):
-        if not selected_items:
-            st.warning("請先勾選單元")
-        else:
-            master_zip_io = io.BytesIO()
-            with zipfile.ZipFile(master_zip_io, 'w') as master_zip:
-                p_bar = st.progress(0)
-                for idx, item in enumerate(selected_items):
-                    st.write(f"正在處理: {item['main']} > {item['name']}")
-                    zip_url = f"https://web.klokah.tw/text/php/downloadZip.php?tid={item['tid']}"
-                    try:
-                        z_res = requests.get(zip_url, timeout=20)
-                        if z_res.status_code == 200:
-                            with zipfile.ZipFile(io.BytesIO(z_res.content)) as sub_zip:
-                                for f_name in sub_zip.namelist():
-                                    if f_name.lower().endswith('.mp3'):
-                                        fixed = process_audio_bytes(sub_zip.read(f_name))
-                                        # 存放在：大標/TID_檔名
-                                        safe_main = "".join(x for x in item['main'] if x.isalnum())
-                                        master_zip.writestr(f"{safe_main}/{item['tid']}_{os.path.basename(f_name)}", fixed)
-                    except: pass
-                    p_bar.progress((idx + 1) / len(selected_items))
-            
-            st.success("✨ 優化完成！")
-            st.download_button("⬇️ 下載最終 ZIP 總包", master_zip_io.getvalue(), "Klokah_Full_Collection.zip")
+    if st.button(f"🌀 開始優化下載 ({len(selected_tids)} 個項目)"):
+        master_zip_io = io.BytesIO()
+        with zipfile.ZipFile(master_zip_io, 'w') as master_zip:
+            p_bar = st.progress(0)
+            for i, unit in enumerate(selected_tids):
+                st.write(f"正在處理：{unit['name']}")
+                dl_url = f"https://web.klokah.tw/text/php/downloadZip.php?tid={unit['tid']}"
+                try:
+                    r = requests.get(dl_url, timeout=20)
+                    if len(r.content) > 500:
+                        with zipfile.ZipFile(io.BytesIO(r.content)) as sub_zip:
+                            for f_name in sub_zip.namelist():
+                                if f_name.lower().endswith('.mp3'):
+                                    fixed = process_audio_bytes(sub_zip.read(f_name))
+                                    master_zip.writestr(f"{unit['tid']}/{os.path.basename(f_name)}", fixed)
+                except: pass
+                p_bar.progress((i + 1) / len(selected_tids))
+        
+        st.success("🎉 全部處理完畢！")
+        st.download_button("⬇️ 下載 API 優化總包", master_zip_io.getvalue(), "Klokah_API_Fixed.zip")
