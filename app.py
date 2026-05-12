@@ -38,18 +38,18 @@ def process_audio_bytes(audio_bytes):
     except:
         return audio_bytes
 
-# --- 網頁介面佈局 ---
+# --- 網頁介面 ---
 st.set_page_config(page_title="族語教材精確後製器", page_icon="🎙️", layout="wide")
-st.title("🎙️ 族語教材：14 課全自動後製下載")
+st.title("🎙️ 族語教材：14 課全量深度掃描器")
 
 if 'structured_data' not in st.session_state:
     st.session_state.structured_data = {}
 
 user_id = st.text_input("輸入帳號 (如: pic11304)", value="pic11304")
 
-if st.button("🔍 重新掃描所有教材結構"):
+if st.button("🔍 地毯式掃描所有教材"):
     if user_id:
-        with st.spinner("正在解析大標與次標結構..."):
+        with st.spinner("正在執行全網域掃描，請稍候..."):
             try:
                 url = f"https://web.klokah.tw/text/main.php?user={user_id}"
                 headers = {'User-Agent': 'Mozilla/5.0'}
@@ -57,60 +57,58 @@ if st.button("🔍 重新掃描所有教材結構"):
                 res.encoding = 'utf-8'
                 soup = BeautifulSoup(res.text, "html.parser")
                 
-                # 建立結構字典
-                new_structure = {}
-                
-                # 尋找所有教材的大外層 <li>
-                list_items = soup.find_all("li", class_="list-list")
-                
-                for li in list_items:
-                    # 1. 抓取大標題名稱
-                    main_title_tag = li.find("span", class_="list-name-sp")
-                    if not main_title_tag:
-                        continue
-                    main_title = main_title_tag.get_text(strip=True)
-                    
-                    # 2. 抓取該大標下方的所有次單元
-                    sub_lessons = []
-                    # 尋找 class-name-btn 且帶有 data-class 的按鈕
-                    sub_btns = li.find_all("button", class_=re.compile(r"class-name-btn"))
-                    
-                    for btn in sub_btns:
-                        if btn.has_attr('data-class'):
-                            tid = btn['data-class']
-                            sub_name = btn.get_text(strip=True)
-                            sub_lessons.append({"tid": tid, "sub_name": sub_name})
-                    
-                    if sub_lessons:
-                        new_structure[main_title] = sub_lessons
+                # 最終存放結果：{ 大標: [ {tid, sub_name}, ... ] }
+                final_map = {}
 
-                st.session_state.structured_data = new_structure
-                if new_structure:
-                    st.success(f"成功！已掃描到 {len(new_structure)} 課教材。")
+                # 邏輯：直接找出頁面上所有具備 data-class 的次標按鈕
+                all_sub_btns = soup.find_all("button", attrs={"data-class": True})
+                
+                for btn in all_sub_btns:
+                    tid = btn['data-class']
+                    sub_name = btn.get_text(strip=True)
+                    
+                    # 關鍵：往上尋找最近的大標題容器 li.list-list
+                    parent_li = btn.find_parents("li", class_="list-list")
+                    if parent_li:
+                        # 在這個特定的 li 裡面找它的大標名稱
+                        main_tag = parent_li[0].find("span", class_="list-name-sp")
+                        main_title = main_tag.get_text(strip=True) if main_tag else "未分類教材"
+                    else:
+                        main_title = "其他教材"
+
+                    if main_title not in final_map:
+                        final_map[main_title] = []
+                    
+                    # 避免重複加入
+                    if tid not in [x['tid'] for x in final_map[main_title]]:
+                        final_map[main_title].append({"tid": tid, "sub_name": sub_name})
+
+                st.session_state.structured_data = final_map
+                
+                if final_map:
+                    st.success(f"成功！已掃描到 {len(final_map)} 課教材，共計 {sum(len(v) for v in final_map.values())} 個單元。")
                 else:
-                    st.error("掃描不到結構，請確認網頁原始碼是否正確載入。")
+                    st.error("掃描不到任何單元。")
             except Exception as e:
                 st.error(f"連線出錯：{e}")
 
-# --- 顯示帶有大標的勾選選單 ---
+# --- 介面呈現 ---
 if st.session_state.structured_data:
     st.write("---")
-    st.write("### 📂 請選擇欲處理的單元 (資料夾將維持數字 ID)")
-    
     selected_list = []
     
-    # 按照大標題分組顯示
     for main_title, units in st.session_state.structured_data.items():
         with st.expander(f"📘 {main_title}", expanded=True):
-            cols = st.columns(3) # 三欄顯示節省空間
+            # 這裡我們用多列佈局，讓 6 個單元能整齊排開
+            cols = st.columns(3)
             for idx, unit in enumerate(units):
-                col = cols[idx % 3]
-                if col.checkbox(f"{unit['sub_name']}", key=f"cb_{unit['tid']}"):
-                    selected_list.append(unit)
+                with cols[idx % 3]:
+                    if st.checkbox(f"{unit['sub_name']}", key=f"cb_{unit['tid']}"):
+                        selected_list.append(unit)
 
     st.write("---")
     
-    if st.button(f"🚀 開始後製已選取的 {len(selected_list)} 個單元"):
+    if st.button(f"🚀 開始後製選取的 {len(selected_list)} 個單元"):
         if not selected_list:
             st.warning("請先勾選單元！")
         else:
@@ -118,7 +116,7 @@ if st.session_state.structured_data:
             with zipfile.ZipFile(master_zip_io, 'w') as master_zip:
                 p_bar = st.progress(0)
                 for i, unit in enumerate(selected_list):
-                    st.write(f"正在下載與處理：{unit['sub_name']} (ID: {unit['tid']})")
+                    st.write(f"處理中：{unit['sub_name']} ({unit['tid']})")
                     zip_url = f"https://web.klokah.tw/text/php/downloadZip.php?tid={unit['tid']}"
                     try:
                         z_res = requests.get(zip_url, timeout=20)
@@ -127,12 +125,10 @@ if st.session_state.structured_data:
                                 for f_name in sub_zip.namelist():
                                     if f_name.lower().endswith('.mp3'):
                                         fixed = process_audio_bytes(sub_zip.read(f_name))
-                                        # 檔名不變，資料夾使用數字 TID
                                         orig_filename = os.path.basename(f_name)
                                         master_zip.writestr(f"{unit['tid']}/{orig_filename}", fixed)
-                    except:
-                        st.warning(f"單元 {unit['tid']} 處理失敗，請稍後再試。")
+                    except: pass
                     p_bar.progress((i + 1) / len(selected_list))
             
-            st.success("🎉 選定教材已全部優化完成！")
-            st.download_button("⬇️ 下載 ZIP 優化包", master_zip_io.getvalue(), f"Klokah_Fixed_{user_id}.zip")
+            st.success("🎉 全部處理完成！")
+            st.download_button("⬇️ 下載 ZIP", master_zip_io.getvalue(), f"Klokah_Fixed_{user_id}.zip")
