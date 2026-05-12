@@ -37,51 +37,80 @@ def process_audio_bytes(audio_bytes):
         return audio_bytes
 
 # --- 網頁介面 ---
-st.set_page_config(page_title="族語教材直接下載器", page_icon="🚀")
-st.title("🚀 繞過掃描：直接 TID 下載後製器")
+st.set_page_config(page_title="族語教材：全量自動抓取", page_icon="📡", layout="wide")
+st.title("📡 穿透掃描：全自動 ZIP 清單提取器")
 
-st.info("由於網頁結構可能是動態生成的，我們直接輸入單元 ID (TID) 來進行下載與優化。")
+user_id = st.text_input("輸入帳號 (如: pic11304)", value="pic11304")
 
-# 這裡讓你手動輸入 ID，或者我們預設第一課的 ID
-default_ids = "74770, 74771, 74772, 74773, 74774, 74775"
-tid_input = st.text_area("請輸入要處理的 TID (用逗號隔開)", value=default_ids)
+if 'found_files' not in st.session_state:
+    st.session_state.found_files = []
 
-if st.button("🚀 開始直接抓取並後製"):
-    tids = [t.strip() for t in tid_input.split(",") if t.strip()]
+if st.button("🔍 偵測全網頁可用 ZIP 資源"):
+    with st.spinner("正在探測後台資料介面..."):
+        # 策略：直接去請求 Klokah 獲取資料清單的 PHP
+        # 通常這類動態網頁會有一個讀取清單的 endpoint
+        api_url = f"https://web.klokah.tw/text/php/get_text_list.php?user={user_id}" 
+        
+        try:
+            headers = {'User-Agent': 'Mozilla/5.0'}
+            res = requests.get(api_url, headers=headers)
+            
+            # 如果能拿到 JSON 或 XML 資料
+            if res.status_code == 200:
+                # 這裡假設它回傳的是結構化資料
+                # 若抓不到 API，我們就用「ID 區間暴力探測」
+                st.info("正在執行 ID 區間探測 (預測 TID 範圍)...")
+                
+                # 根據你提供的 74770，我們探測附近 200 個 ID
+                start_id = 74770
+                results = []
+                
+                # 建立一個進度條
+                p_bar = st.progress(0)
+                for i in range(100): # 探測 100 個 ID
+                    test_id = start_id + i
+                    # 這裡我們不下載整個 ZIP，只用 HEAD 請求確認檔案是否存在
+                    check_url = f"https://web.klokah.tw/text/php/downloadZip.php?tid={test_id}"
+                    check_res = requests.head(check_url)
+                    
+                    if check_res.status_code == 200:
+                        results.append({"tid": str(test_id), "name": f"單元 ID: {test_id}"})
+                    
+                    p_bar.progress((i + 1) / 100)
+                
+                st.session_state.found_files = results
+                st.success(f"探測完成！發現 {len(results)} 個可下載的 ZIP 資源。")
+            else:
+                st.error("無法連通後台資料介面。")
+        except Exception as e:
+            st.error(f"探測發生錯誤：{e}")
+
+# --- 顯示清單與處理 ---
+if st.session_state.found_files:
+    st.write("---")
+    selected_tids = []
     
-    if not tids:
-        st.warning("請輸入至少一個 TID")
-    else:
+    cols = st.columns(4)
+    for idx, item in enumerate(st.session_state.found_files):
+        with cols[idx % 4]:
+            if st.checkbox(f"📦 {item['name']}", key=f"chk_{item['tid']}", value=True):
+                selected_tids.append(item['tid'])
+
+    if st.button(f"🚀 批次後製下載 ({len(selected_tids)} 個項目)"):
         master_zip_io = io.BytesIO()
-        success_count = 0
-        
         with zipfile.ZipFile(master_zip_io, 'w') as master_zip:
-            p_bar = st.progress(0)
-            for idx, tid in enumerate(tids):
-                st.write(f"正在嘗試下載 TID: {tid}...")
-                zip_url = f"https://web.klokah.tw/text/php/downloadZip.php?tid={tid}"
-                
-                try:
-                    # 這裡不抓網頁，直接請求下載 API
-                    res = requests.get(zip_url, timeout=20)
-                    if res.status_code == 200 and len(res.content) > 500: # 確保不是抓到空檔案
-                        with zipfile.ZipFile(io.BytesIO(res.content)) as sub_zip:
-                            for f_name in sub_zip.namelist():
-                                if f_name.lower().endswith('.mp3'):
-                                    fixed = process_audio_bytes(sub_zip.read(f_name))
-                                    # 存放路徑：{TID}/{檔名}
-                                    master_zip.writestr(f"{tid}/{os.path.basename(f_name)}", fixed)
-                        st.write(f"✅ TID {tid} 處理完成")
-                        success_count += 1
-                    else:
-                        st.error(f"❌ TID {tid} 下載失敗 (檔案不存在或權限不足)")
-                except Exception as e:
-                    st.error(f"💥 TID {tid} 發生錯誤: {e}")
-                
-                p_bar.progress((idx + 1) / len(tids))
+            proc_bar = st.progress(0)
+            for i, tid in enumerate(selected_tids):
+                st.write(f"處理中 ID: {tid}...")
+                dl_url = f"https://web.klokah.tw/text/php/downloadZip.php?tid={tid}"
+                r = requests.get(dl_url)
+                if len(r.content) > 500:
+                    with zipfile.ZipFile(io.BytesIO(r.content)) as sub:
+                        for f in sub.namelist():
+                            if f.lower().endswith('.mp3'):
+                                fixed = process_audio_bytes(sub.read(f))
+                                master_zip.writestr(f"{tid}/{os.path.basename(f)}", fixed)
+                proc_bar.progress((i + 1) / len(selected_tids))
         
-        if success_count > 0:
-            st.success(f"🎉 全部處理完成！共成功處理 {success_count} 個單元。")
-            st.download_button("⬇️ 下載最終優化包", master_zip_io.getvalue(), "Klokah_Direct_Fixed.zip")
-        else:
-            st.error("沒有任何單元被成功處理，請檢查 TID 是否正確。")
+        st.success("✨ 處理完畢！")
+        st.download_button("⬇️ 下載優化總包", master_zip_io.getvalue(), "Klokah_Auto_Scan.zip")
