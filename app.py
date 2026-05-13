@@ -9,7 +9,7 @@ import noisereduce as nr
 from pydub import AudioSegment, effects
 from pydub.silence import detect_nonsilent
 
-# --- 專業音訊處理 (與本地 v3.6 核心邏輯一致) ---
+# --- 專業音訊處理 (降噪 0.75, 響度 -18dB, 峰值 -6dB) ---
 def process_audio_final(audio_bytes):
     try:
         audio = AudioSegment.from_file(io.BytesIO(audio_bytes))
@@ -31,7 +31,7 @@ def process_audio_final(audio_bytes):
         if intervals:
             audio = audio[max(0, intervals[0][0]-200) : min(len(audio), intervals[-1][1]+200)]
 
-        # 3. 響度平衡 (-18 dBFS) 與 厚度壓縮 (模擬 Loudnorm)
+        # 3. 響度平衡 (-18 dBFS) 與 厚度壓縮
         diff = -18.0 - audio.dBFS
         audio = audio.apply_gain(diff)
         audio = audio.compress_dynamic_range(threshold=-16.0, ratio=3.0, attack=5.0, release=50.0)
@@ -45,62 +45,52 @@ def process_audio_final(audio_bytes):
     except:
         return audio_bytes
 
-# --- UI 管理與狀態函數 ---
-st.set_page_config(page_title="族語教材精準分類器", page_icon="🗂️", layout="wide")
-st.title("🗂️ 族語全自動：教材層級細分與專業後製")
+# --- UI 與狀態更新邏輯 ---
+st.set_page_config(page_title="族語教材精準下載器", page_icon="🗂️", layout="wide")
+st.title("🗂️ 族語全自動：穩定勾選與層級分類版")
 
+# 初始化狀態
 if 'tasks' not in st.session_state: st.session_state.tasks = []
-if 'sel' not in st.session_state: st.session_state.sel = {}
+if 'sel_dict' not in st.session_state: st.session_state.sel_dict = {}
 
-def update_sel(task_ids, value):
-    for tid in task_ids: st.session_state.sel[tid] = value
+# 更新狀態用的 Callback
+def sync_selection(tids, val):
+    for tid in tids:
+        st.session_state.sel_dict[tid] = val
 
-user_id = st.text_input("輸入帳號 ID (例如: picex11301)", value="picex11301")
+user_id = st.text_input("輸入帳號 ID", value="picex11301")
 
-if st.button("🔍 1. 抓取教材層級與清單"):
+if st.button("🔍 1. 抓取教材層級清單"):
     try:
         res = requests.get(f"https://web.klokah.tw/text/php/querrySentence.php?id={user_id}", timeout=15)
         data = res.json()
         new_tasks = []
 
-        # 深度掃描函數：追蹤 listTitle 和當前標題
-        def deep_scan(obj, list_title="未知大單元", sub_title=""):
+        def scan(obj, list_t="未知大單元", sub_t=""):
             if isinstance(obj, dict):
-                # 更新層級名稱
-                l_title = obj.get('listTitle') or list_title
-                s_title = obj.get('title') or obj.get('name') or sub_title
-                
-                # 組合顯示資料夾名稱：[大單元名稱] 小單元名稱 (網址ID)
-                # 例如：[01-來唱我們的歌吧] 序 (70284)
+                l_title = obj.get('listTitle') or list_t
+                s_title = obj.get('title') or obj.get('name') or sub_t
                 for k, v in obj.items():
                     if isinstance(v, str) and (v.endswith('.mp3') or v.endswith('.wav')):
-                        # 從網址提取 ID 作為備份標籤
-                        path_parts = v.split('/')
-                        url_id = path_parts[-2] if len(path_parts) >= 2 else "unk"
-                        
-                        folder_name = f"【{l_title}】{s_title} ({url_id})"
+                        url_id = v.split('/')[-2] if len(v.split('/')) >= 2 else "unk"
+                        folder = f"【{l_title}】{s_title} ({url_id})"
                         full_url = v if v.startswith('http') else f"https://web.klokah.tw/text/{v.lstrip('./')}"
-                        tid = f"{folder_name}_{os.path.basename(v)}"
-                        
-                        new_tasks.append({
-                            "url": full_url, 
-                            "folder": folder_name, 
-                            "file": os.path.basename(v), 
-                            "id": tid
-                        })
-                        if tid not in st.session_state.sel: st.session_state.sel[tid] = True
+                        tid = f"{folder}_{os.path.basename(v)}"
+                        new_tasks.append({"url": full_url, "folder": folder, "file": os.path.basename(v), "id": tid})
+                        # 預設勾選
+                        if tid not in st.session_state.sel_dict:
+                            st.session_state.sel_dict[tid] = True
                     else:
-                        deep_scan(v, l_title, s_title)
+                        scan(v, l_title, s_title)
             elif isinstance(obj, list):
-                for item in obj: deep_scan(item, list_title, sub_title)
+                for i in obj: scan(i, list_t, sub_t)
 
-        deep_scan(data)
+        scan(data)
         st.session_state.tasks = new_tasks
-        st.success(f"解析成功！共找到 {len(new_tasks)} 個音檔。")
-    except Exception as e:
-        st.error(f"解析失敗: {e}")
+        st.success(f"解析成功！共 {len(new_tasks)} 個音檔。")
+    except: st.error("API 解析失敗")
 
-# --- 顯示層級分組 ---
+# --- 顯示層級與穩定勾選 ---
 if st.session_state.tasks:
     grouped = {}
     for t in st.session_state.tasks: grouped.setdefault(t['folder'], []).append(t)
@@ -108,48 +98,49 @@ if st.session_state.tasks:
     st.write("---")
     all_ids = [t['id'] for t in st.session_state.tasks]
     c_g1, c_g2, _ = st.columns([1, 1, 8])
-    c_g1.button("🌐 全部全選", on_click=update_sel, args=(all_ids, True))
-    c_g2.button("🌐 全部取消", on_click=update_sel, args=(all_ids, False))
+    c_g1.button("🌐 全部選取", on_click=sync_selection, args=(all_ids, True))
+    c_g2.button("🌐 全部取消", on_click=sync_selection, args=(all_ids, False))
 
-    for folder_name in sorted(grouped.keys()):
-        items = grouped[folder_name]
-        folder_ids = [i['id'] for i in items]
+    for folder in sorted(grouped.keys()):
+        items = grouped[folder]
+        item_ids = [i['id'] for i in items]
         
-        with st.expander(f"📁 {folder_name}", expanded=True):
-            c1, c2, _ = st.columns([1, 1, 8])
-            c1.button(f"勾選此層級", key=f"all_{folder_name}", on_click=update_sel, args=(folder_ids, True))
-            c2.button(f"取消此層級", key=f"none_{folder_name}", on_click=update_sel, args=(folder_ids, False))
+        with st.expander(f"📁 {folder}", expanded=True):
+            b1, b2, _ = st.columns([1, 1, 8])
+            b1.button(f"全選此單元", key=f"all_{folder}", on_click=sync_selection, args=(item_ids, True))
+            b2.button(f"清空此單元", key=f"none_{folder}", on_click=sync_selection, args=(item_ids, False))
             
-            st.write("---")
+            st.write("")
             cols = st.columns(3)
             for idx, item in enumerate(items):
                 with cols[idx % 3]:
-                    st.session_state.sel[item['id']] = st.checkbox(
+                    # 改用 toggle 且手動綁定狀態
+                    # 使用 session_state 直接作為存儲，避免 checkbox 狀態跑掉
+                    st.session_state.sel_dict[item['id']] = st.toggle(
                         item['file'], 
-                        value=st.session_state.sel.get(item['id'], True), 
-                        key=f"cb_{item['id']}"
+                        value=st.session_state.sel_dict.get(item['id'], True),
+                        key=f"tg_{item['id']}"
                     )
 
-    final_list = [t for t in st.session_state.tasks if st.session_state.sel.get(t['id'])]
+    # 執行下載
+    final_list = [t for t in st.session_state.tasks if st.session_state.sel_dict.get(t['id'])]
     st.write("---")
     if st.button(f"🚀 2. 開始後製打包 ({len(final_list)} 個)"):
         if not final_list:
-            st.warning("請勾選音檔")
+            st.warning("尚未選擇檔案")
         else:
-            zip_buffer = io.BytesIO()
-            with zipfile.ZipFile(zip_buffer, 'w') as zip_file:
-                prog = st.progress(0)
+            zip_io = io.BytesIO()
+            with zipfile.ZipFile(zip_io, 'w') as zf:
+                p_bar = st.progress(0)
                 msg = st.empty()
                 for i, task in enumerate(final_list):
-                    msg.text(f"正在後製 (-6dB 峰值): {task['file']}")
+                    msg.text(f"處理中: {task['file']}")
                     try:
                         r = requests.get(task['url'], timeout=10)
                         if r.status_code == 200:
-                            # 執行專業後製
                             processed = process_audio_final(r.content)
-                            # 存入對應名稱的資料夾
-                            zip_file.writestr(f"{task['folder']}/{task['file']}", processed)
+                            zf.writestr(f"{task['folder']}/{task['file']}", processed)
                     except: pass
-                    prog.progress((i + 1) / len(final_list))
-                msg.text("✨ 教材後製打包完成！")
-            st.download_button("⬇️ 下載最終分類包", zip_buffer.getvalue(), f"{user_id}_Categorized_Pro.zip")
+                    p_bar.progress((i + 1) / len(final_list))
+                msg.text("✨ 打包完成！")
+            st.download_button("⬇️ 下載專業平衡包", zip_io.getvalue(), f"{user_id}_Categorized.zip")
