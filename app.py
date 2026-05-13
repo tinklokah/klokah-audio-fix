@@ -1,27 +1,31 @@
 import streamlit as st
 import requests
 import io
-import zipfile
 import os
+import json
 import noisereduce as nr
 import librosa
 import soundfile as sf
 from pydub import AudioSegment
 from pydub.silence import detect_nonsilent
+import zipfile
 
 # --- v9.1 安全後製引擎 ---
 def process_audio_bytes(audio_bytes):
     try:
         audio = AudioSegment.from_file(io.BytesIO(audio_bytes))
+        # 轉 wav 處理
         wav_io = io.BytesIO()
         audio.export(wav_io, format="wav")
         wav_io.seek(0)
         y, sr = librosa.load(wav_io, sr=None)
+        # 降噪
         reduced = nr.reduce_noise(y=y, sr=sr, prop_decrease=0.72)
         tmp_io = io.BytesIO()
         sf.write(tmp_io, reduced, sr, format='WAV')
         tmp_io.seek(0)
         audio = AudioSegment.from_wav(tmp_io)
+        # 裁切靜音
         intervals = detect_nonsilent(audio, min_silence_len=200, silence_thresh=-48)
         valid = [i for i in intervals if (i[1] - i[0]) > 100]
         if valid:
@@ -30,6 +34,7 @@ def process_audio_bytes(audio_bytes):
             audio = audio.compress_dynamic_range(threshold=-7.0, ratio=8.0, attack=10.0, release=60.0)
             audio = audio + (-6.0 - audio.max_dBFS)
             audio = audio[max(0, valid[0][0]-300) : min(len(audio), valid[-1][1]+300)]
+        
         out_io = io.BytesIO()
         audio.export(out_io, format="mp3", bitrate="192k")
         return out_io.getvalue()
@@ -37,88 +42,77 @@ def process_audio_bytes(audio_bytes):
         return audio_bytes
 
 # --- 網頁介面 ---
-st.set_page_config(page_title="API 級全量抓取器", page_icon="🔗", layout="wide")
-st.title("🔗 API 驅動：族語教材全自動下載優化")
+st.set_page_config(page_title="路徑直取優化器", page_icon="🎵")
+st.title("🎵 族語教材：音檔路徑直取優化器")
 
-user_id = st.text_input("輸入帳號 (ID)", value="alp11541")
+st.info("直接貼入包含音檔路徑的 JSON 資料，我會直接抓取 MP3 並進行優化。")
 
-if 'api_units' not in st.session_state:
-    st.session_state.api_units = []
+raw_json = st.text_area("請在此貼上 API 回傳的完整 JSON 內容", height=300)
 
-if st.button("🚀 從 API 獲取教材清單"):
-    with st.spinner("正在呼叫後台 API..."):
-        # 你提供的 API 網址
-        api_url = f"https://web.klokah.tw/text/php/querrySentence.php?id={user_id}"
-        
+if st.button("🔍 解析路徑並準備抓取"):
+    if not raw_json:
+        st.error("請提供資料內容")
+    else:
         try:
-            res = requests.get(api_url, timeout=15)
-            # 偵測回傳格式 (可能是 JSON 或 XML)
-            if res.status_code == 200:
-                data = res.json() # 假設它是標準 JSON
-                
-                # --- 自動解析邏輯 ---
-                # 這裡會根據回傳的 JSON 結構提取 tid。
-                # 假設 JSON 裡面有類似 "tid" 或 "class_id" 的欄位
-                found_items = []
-                
-                # 這是一個遞迴搜尋函數，不管 JSON 有多深，只要看到 tid 就抓
-                def find_tids(obj):
-                    if isinstance(obj, dict):
-                        # 這裡的 key 根據 API 內容調整，常見為 'tid' 或 'id'
-                        tid = obj.get('tid') or obj.get('class_id')
-                        name = obj.get('title') or obj.get('name') or f"單元 {tid}"
-                        if tid:
-                            found_items.append({"tid": str(tid), "name": name})
-                        for v in obj.values():
-                            find_tids(v)
-                    elif isinstance(obj, list):
-                        for item in obj:
-                            find_tids(item)
+            data = json.loads(raw_json)
+            audio_tasks = []
 
-                find_tids(data)
-                
-                # 去重
-                unique_items = {i['tid']: i for i in found_items}.values()
-                st.session_state.api_units = list(unique_items)
-                
-                if st.session_state.api_units:
-                    st.success(f"✅ 成功！API 回傳了 {len(st.session_state.api_units)} 個單元。")
-                else:
-                    st.warning("API 連通了，但裡面沒找到單元 ID。請檢查 API 回傳的內容。")
-                    st.write("DEBUG (API 內容):", data) # 顯示出來讓我們看結構
+            # 遞迴掃描所有的音檔路徑
+            def scan_for_audio(obj, current_unit=""):
+                if isinstance(obj, dict):
+                    # 抓取單元名稱作為資料夾名
+                    unit_name = obj.get('title') or obj.get('name') or current_unit
+                    
+                    # 搜尋可能的音檔欄位 (例如: audio, mp3, path, file)
+                    for k, v in obj.items():
+                        if isinstance(v, str) and (v.endswith('.mp3') or v.endswith('.wav')):
+                            # 補全網址 (假設 JSON 裡是相對路徑)
+                            full_url = v if v.startswith('http') else f"https://web.klokah.tw/text/{v.lstrip('./')}"
+                            audio_tasks.append({
+                                "url": full_url,
+                                "folder": unit_name,
+                                "filename": os.path.basename(v)
+                            })
+                        else:
+                            scan_for_audio(v, unit_name)
+                elif isinstance(obj, list):
+                    for item in obj:
+                        scan_for_audio(item, current_unit)
+
+            scan_for_audio(data)
+            
+            if audio_tasks:
+                st.session_state.audio_tasks = audio_tasks
+                st.success(f"✅ 發現了 {len(audio_tasks)} 個音檔路徑！")
             else:
-                st.error(f"API 呼叫失敗，狀態碼：{res.status_code}")
+                st.warning("資料中找不到音檔路徑 (.mp3)，請確認 JSON 內容。")
         except Exception as e:
-            st.error(f"發生錯誤：{e}")
+            st.error(f"解析失敗：{e}")
 
-# --- 批次處理 ---
-if st.session_state.api_units:
+# --- 下載與處理 ---
+if 'audio_tasks' in st.session_state:
     st.write("---")
-    selected_tids = []
-    
-    cols = st.columns(3)
-    for idx, item in enumerate(st.session_state.api_units):
-        with cols[idx % 3]:
-            if st.checkbox(f"📦 {item['name']} (TID: {item['tid']})", key=f"api_{item['tid']}", value=True):
-                selected_tids.append(item)
-
-    if st.button(f"🌀 開始優化下載 ({len(selected_tids)} 個項目)"):
+    if st.button(f"🚀 開始抓取並後製這 {len(st.session_state.audio_tasks)} 個檔案"):
         master_zip_io = io.BytesIO()
+        success_count = 0
+        
         with zipfile.ZipFile(master_zip_io, 'w') as master_zip:
             p_bar = st.progress(0)
-            for i, unit in enumerate(selected_tids):
-                st.write(f"正在處理：{unit['name']}")
-                dl_url = f"https://web.klokah.tw/text/php/downloadZip.php?tid={unit['tid']}"
+            for idx, task in enumerate(st.session_state.audio_tasks):
+                st.write(f"處理中: {task['filename']}")
                 try:
-                    r = requests.get(dl_url, timeout=20)
-                    if len(r.content) > 500:
-                        with zipfile.ZipFile(io.BytesIO(r.content)) as sub_zip:
-                            for f_name in sub_zip.namelist():
-                                if f_name.lower().endswith('.mp3'):
-                                    fixed = process_audio_bytes(sub_zip.read(f_name))
-                                    master_zip.writestr(f"{unit['tid']}/{os.path.basename(f_name)}", fixed)
-                except: pass
-                p_bar.progress((i + 1) / len(selected_tids))
-        
-        st.success("🎉 全部處理完畢！")
-        st.download_button("⬇️ 下載 API 優化總包", master_zip_io.getvalue(), "Klokah_API_Fixed.zip")
+                    r = requests.get(task['url'], timeout=10)
+                    if r.status_code == 200:
+                        # 進行後製
+                        fixed = process_audio_bytes(r.content)
+                        # 依照單元名稱存放
+                        save_path = f"{task['folder']}/{task['filename']}"
+                        master_zip.writestr(save_path, fixed)
+                        success_count += 1
+                except:
+                    st.error(f"無法抓取: {task['url']}")
+                p_bar.progress((idx + 1) / len(st.session_state.audio_tasks))
+
+        if success_count > 0:
+            st.success(f"🎉 大功告成！成功後製了 {success_count} 個音檔。")
+            st.download_button("⬇️ 下載優化音檔包", master_zip_io.getvalue(), "Klokah_Audio_Fixed.zip")
