@@ -9,135 +9,141 @@ import noisereduce as nr
 from pydub import AudioSegment, effects
 from pydub.silence import detect_nonsilent
 
-# --- 核心優化：純 Python 專業級音平衡 ---
-def process_audio_pure_python(audio_bytes, target_dBFS=-18.0):
+# --- 專業音訊處理引擎 (純 Python 模擬音量厚度) ---
+def process_audio_final(audio_bytes):
     try:
-        # 1. 讀入音檔並初步降噪
         audio = AudioSegment.from_file(io.BytesIO(audio_bytes))
         
-        # 轉 wav 供 librosa 降噪 (降噪參數移植 0.75)
+        # 1. 降噪處理 (參數 0.75)
         wav_io = io.BytesIO()
         audio.export(wav_io, format="wav")
         wav_io.seek(0)
         y, sr = librosa.load(wav_io, sr=None)
         reduced = nr.reduce_noise(y=y, sr=sr, prop_decrease=0.75)
         
-        # 轉回 pydub
         tmp_io = io.BytesIO()
         sf.write(tmp_io, reduced, sr, format='WAV')
         tmp_io.seek(0)
         audio = AudioSegment.from_wav(tmp_io)
 
-        # 2. 去頭尾靜音 (參數移植：前後保留 200ms)
+        # 2. 去頭尾靜音 (前後保留 200ms)
         intervals = detect_nonsilent(audio, min_silence_len=300, silence_thresh=-45)
         if intervals:
             start_trim = max(0, intervals[0][0] - 200)
             end_trim = min(len(audio), intervals[-1][1] + 200)
             audio = audio[start_trim:end_trim]
 
-        # 3. 【關鍵】模擬 Loudnorm 的音平衡
-        # A. RMS 響度匹配：將「平均體感音量」對齊到 -18 dBFS
-        change_in_dBFS = target_dBFS - audio.dBFS
-        audio = audio.apply_gain(change_in_dBFS)
+        # 3. 響度平衡與厚度感 (RMS Normalization)
+        # 目標 -18 dBFS 平均響度
+        diff = -18.0 - audio.dBFS
+        audio = audio.apply_gain(diff)
         
-        # B. 動態壓縮 (Compressor)：這是讓聲音變「厚實」的關鍵
-        # 壓縮太大的波峰，讓小聲的細節浮現
-        audio = audio.compress_dynamic_range(
-            threshold=-16.0, # 低於 -16dB 的聲音會被壓縮
-            ratio=3.0,       # 壓縮比
-            attack=5.0,      # 反應速度 (ms)
-            release=50.0     # 釋放速度 (ms)
-        )
+        # 4. 動態壓縮 (讓聲音紮實，不刺耳)
+        audio = audio.compress_dynamic_range(threshold=-16.0, ratio=3.0, attack=5.0, release=50.0)
 
-        # 4. 【強制峰值】推至 -6dB 
-        # 使用 pydub 的 normalize 並設定 headroom 為 6.0，確保最高點就在 -6dB
+        # 5. 強制峰值鎖定在 -6dB
         audio = effects.normalize(audio, headroom=6.0)
 
-        # 5. 輸出
         out_io = io.BytesIO()
         audio.export(out_io, format="mp3", bitrate="192k")
         return out_io.getvalue()
-    except Exception as e:
+    except:
         return audio_bytes
 
-# --- 網頁介面 (與之前相同) ---
-st.set_page_config(page_title="族語 AI 優化 (免FFmpeg版)", page_icon="⚖️", layout="wide")
-st.title("⚖️ 族語全自動：純 Python 專業音平衡版")
+# --- 網頁 UI 邏輯 ---
+st.set_page_config(page_title="族語專業後製工具", page_icon="🎙️", layout="wide")
+st.title("🎙️ 族語全自動：專業後製與精準分類 (修正版)")
+
+# 初始化存儲空間
+if 'tasks' not in st.session_state:
+    st.session_state.tasks = []
+if 'sel_map' not in st.session_state:
+    st.session_state.sel_map = {}
 
 user_id = st.text_input("輸入帳號 ID", value="picex11301")
 
-if 'audio_tasks' not in st.session_state:
-    st.session_state.audio_tasks = []
-
-if st.button("🔍 1. 抓取清單"):
+if st.button("🔍 1. 抓取 API 清單"):
     api_url = f"https://web.klokah.tw/text/php/querrySentence.php?id={user_id}"
     try:
         res = requests.get(api_url, timeout=15)
         data = res.json()
-        tasks = []
+        new_tasks = []
         def scan(obj):
             if isinstance(obj, dict):
                 for k, v in obj.items():
                     if isinstance(v, str) and (v.endswith('.mp3') or v.endswith('.wav')):
                         full_url = v if v.startswith('http') else f"https://web.klokah.tw/text/{v.lstrip('./')}"
                         folder = v.split('/')[-2] if len(v.split('/')) >= 2 else "其他"
-                        tasks.append({"url": full_url, "folder": folder, "file": os.path.basename(v)})
-                        if f"chk_{full_url}" not in st.session_state: st.session_state[f"chk_{full_url}"] = True
+                        tid = f"{folder}_{os.path.basename(v)}"
+                        new_tasks.append({"url": full_url, "folder": folder, "file": os.path.basename(v), "id": tid})
+                        # 預設全部勾選
+                        st.session_state.sel_map[tid] = True
                     else: scan(v)
             elif isinstance(obj, list):
                 for i in obj: scan(i)
         scan(data)
-        st.session_state.audio_tasks = tasks
-        st.success(f"找到 {len(tasks)} 個音檔。")
-    except: st.error("API 連線失敗")
+        st.session_state.tasks = new_tasks
+        st.success(f"找到 {len(new_tasks)} 個音檔！")
+    except:
+        st.error("連線 API 失敗，請檢查 ID 是否正確。")
 
-if st.session_state.audio_tasks:
+# --- 列表與勾選 ---
+if st.session_state.tasks:
     grouped = {}
-    for t in st.session_state.audio_tasks: grouped.setdefault(t['folder'], []).append(t)
-    
+    for t in st.session_state.tasks:
+        grouped.setdefault(t['folder'], []).append(t)
+
     st.write("---")
-    # 全域控制
-    col_g1, col_g2, _ = st.columns([1, 1, 8])
-    if col_g1.button("🌐 全部全選"):
-        for t in st.session_state.audio_tasks: st.session_state[f"chk_{t['url']}"] = True
+    # 全域按鈕
+    ga, gn, _ = st.columns([1, 1, 8])
+    if ga.button("🌐 全部勾選"):
+        for t in st.session_state.tasks: st.session_state.sel_map[t['id']] = True
         st.rerun()
-    if col_g2.button("🌐 全部取消"):
-        for t in st.session_state.audio_tasks: st.session_state[f"chk_{t['url']}"] = False
+    if gn.button("🌐 全部取消"):
+        for t in st.session_state.tasks: st.session_state.sel_map[t['id']] = False
         st.rerun()
 
     for folder in sorted(grouped.keys()):
         items = grouped[folder]
-        with st.expander(f"📁 資料夾: {folder} ({len(items)})", expanded=True):
+        with st.expander(f"📁 資料夾 ID: {folder} ({len(items)} 個)", expanded=True):
+            # 資料夾全選控制
             c1, c2, _ = st.columns([1, 1, 8])
-            if c1.button(f"全選 {folder}", key=f"all_{folder}"):
-                for item in items: st.session_state[f"chk_{item['url']}"] = True
+            if c1.button(f"勾選此單元", key=f"all_{folder}"):
+                for item in items: st.session_state.sel_map[item['id']] = True
                 st.rerun()
-            if c2.button(f"清空 {folder}", key=f"none_{folder}"):
-                for item in items: st.session_state[f"chk_{item['url']}"] = False
+            if c2.button(f"清空此單元", key=f"none_{folder}"):
+                for item in items: st.session_state.sel_map[item['id']] = False
                 st.rerun()
             
+            # 顯示檔案
             cols = st.columns(3)
             for idx, item in enumerate(items):
                 with cols[idx % 3]:
-                    st.session_state[f"chk_{item['url']}"] = st.checkbox(f"🎵 {item['file']}", key=f"chk_{item['url']}", value=st.session_state[f"chk_{item['url']}"])
+                    # 這裡不使用 key 直接綁定，而是用手動控制
+                    is_checked = st.checkbox(item['file'], value=st.session_state.sel_map.get(item['id'], True), key=f"check_{item['id']}")
+                    st.session_state.sel_map[item['id']] = is_checked
 
-    final_selection = [t for t in st.session_state.audio_tasks if st.session_state.get(f"chk_{t['url']}", False)]
+    # 執行處理
+    final_list = [t for t in st.session_state.tasks if st.session_state.sel_map.get(t['id'])]
 
-    if st.button(f"🚀 2. 執行深度平衡處理 ({len(final_selection)} 個)"):
-        master_zip_io = io.BytesIO()
-        with zipfile.ZipFile(master_zip_io, 'w') as master_zip:
-            p_bar = st.progress(0)
-            st_text = st.empty()
-            for i, task in enumerate(final_selection):
-                st_text.text(f"處理中: {task['file']}")
-                try:
-                    r = requests.get(task['url'], timeout=10)
-                    if r.status_code == 200:
-                        # 執行純 Python 專業處理
-                        processed = process_audio_pure_python(r.content)
-                        master_zip.writestr(f"{task['folder']}/{task['file']}", processed)
-                except: pass
-                p_bar.progress((i + 1) / len(final_selection))
-            st_text.text("✨ 處理完成！")
-        
-        st.download_button("⬇️ 下載深度平衡分類包", master_zip_io.getvalue(), f"{user_id}_DeepBalanced.zip")
+    st.write("---")
+    if st.button(f"🚀 2. 開始後製打包 ({len(final_list)} 個)"):
+        if not final_list:
+            st.warning("請先勾選檔案")
+        else:
+            zip_buffer = io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, 'w') as zip_file:
+                prog = st.progress(0)
+                status = st.empty()
+                for i, task in enumerate(final_list):
+                    status.text(f"正在後製 (-6dB 峰值): {task['file']}")
+                    try:
+                        r = requests.get(task['url'], timeout=10)
+                        if r.status_code == 200:
+                            processed = process_audio_final(r.content)
+                            zip_file.writestr(f"{task['folder']}/{task['file']}", processed)
+                    except: pass
+                    prog.progress((i + 1) / len(final_list))
+                status.text("✨ 處理完成！")
+            
+            st.download_button("⬇️ 下載專業平衡包", zip_buffer.getvalue(), f"{user_id}_Pro_Balanced.zip")
