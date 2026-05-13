@@ -1,8 +1,6 @@
 streamlit
-pydub
+requests
 librosa
 soundfile
 noisereduce
-numpy
-requests
-beautifulsoup4
+pydub
