@@ -23,7 +23,6 @@ def process_audio_bytes(audio_bytes):
         tmp_io.seek(0)
         audio = AudioSegment.from_wav(tmp_io)
         
-        # 偵測非靜音區段並裁切
         intervals = detect_nonsilent(audio, min_silence_len=200, silence_thresh=-48)
         if intervals:
             audio = audio[max(0, intervals[0][0]-100) : min(len(audio), intervals[-1][1]+100)]
@@ -36,16 +35,14 @@ def process_audio_bytes(audio_bytes):
         return audio_bytes
 
 # --- 網頁介面 ---
-st.set_page_config(page_title="族語 ID 分類全選版", page_icon="✅", layout="wide")
-st.title("✅ 族語全自動：具備資料夾全選功能")
+st.set_page_config(page_title="族語 ID 分類優化版", page_icon="✅", layout="wide")
+st.title("✅ 族語全自動：資料夾全選功能 (修正版)")
 
-user_id = st.text_input("請輸入帳號 ID", value="picex11301")
-
-# 初始化 session_state
+# 初始化
 if 'audio_tasks' not in st.session_state:
     st.session_state.audio_tasks = []
-if 'checkbox_states' not in st.session_state:
-    st.session_state.checkbox_states = {}
+
+user_id = st.text_input("請輸入帳號 ID", value="picex11301")
 
 if st.button("🔍 1. 抓取清單"):
     api_url = f"https://web.klokah.tw/text/php/querrySentence.php?id={user_id}"
@@ -62,6 +59,9 @@ if st.button("🔍 1. 抓取清單"):
                         path_parts = v.split('/')
                         folder_name = path_parts[-2] if len(path_parts) >= 2 else "其他"
                         tasks.append({"url": full_url, "folder": folder_name, "file": os.path.basename(v)})
+                        # 預設勾選
+                        if f"chk_{full_url}" not in st.session_state:
+                            st.session_state[f"chk_{full_url}"] = True
                     else:
                         scan_by_url(v)
             elif isinstance(obj, list):
@@ -69,9 +69,6 @@ if st.button("🔍 1. 抓取清單"):
 
         scan_by_url(data)
         st.session_state.audio_tasks = tasks
-        # 初始化所有 checkbox 為勾選狀態
-        for task in tasks:
-            st.session_state.checkbox_states[task['url']] = True
         st.success(f"找到 {len(tasks)} 個音檔！")
     except Exception as e:
         st.error(f"抓取失敗: {e}")
@@ -82,47 +79,56 @@ if st.session_state.audio_tasks:
     for t in st.session_state.audio_tasks:
         grouped.setdefault(t['folder'], []).append(t)
     
-    st.write("### 📂 勾選音檔 (支援資料夾全選)")
-    
+    st.write("---")
+    # 全域控制
+    col_g1, col_g2, _ = st.columns([1, 1, 8])
+    if col_g1.button("🌐 全部全選"):
+        for t in st.session_state.audio_tasks:
+            st.session_state[f"chk_{t['url']}"] = True
+        st.rerun()
+    if col_g2.button("🌐 全部取消"):
+        for t in st.session_state.audio_tasks:
+            st.session_state[f"chk_{t['url']}"] = False
+        st.rerun()
+
     sorted_folders = sorted(grouped.keys())
     
     for folder in sorted_folders:
         items = grouped[folder]
         with st.expander(f"📁 資料夾 ID: {folder} (共 {len(items)} 個)", expanded=True):
-            # 新增全選/全不選按鈕
-            col_ctrl1, col_ctrl2, _ = st.columns([1, 1, 8])
-            if col_ctrl1.button(f"全選 {folder}", key=f"all_{folder}"):
-                for item in items: st.session_state.checkbox_states[item['url']] = True
-            if col_ctrl2.button(f"清空 {folder}", key=f"none_{folder}"):
-                for item in items: st.session_state.checkbox_states[item['url']] = False
             
+            # 資料夾級別控制
+            c1, c2, _ = st.columns([1, 1, 8])
+            if c1.button(f"全選 {folder}", key=f"all_{folder}"):
+                for item in items:
+                    st.session_state[f"chk_{item['url']}"] = True
+                st.rerun() # 強制重新渲染介面
+            if c2.button(f"清空 {folder}", key=f"none_{folder}"):
+                for item in items:
+                    st.session_state[f"chk_{item['url']}"] = False
+                st.rerun()
+
             st.write("---")
-            
-            # 顯示該資料夾內的音檔 Checkbox
             cols = st.columns(3)
             for idx, item in enumerate(items):
                 with cols[idx % 3]:
-                    # 使用 session_state 控制勾選狀態
-                    st.session_state.checkbox_states[item['url']] = st.checkbox(
+                    st.checkbox(
                         f"🎵 {item['file']}", 
-                        key=f"chk_{item['url']}", 
-                        value=st.session_state.checkbox_states.get(item['url'], True)
+                        key=f"chk_{item['url']}"
                     )
 
-    # 收集最終選取的項目
-    final_selection = [t for t in st.session_state.audio_tasks if st.session_state.checkbox_states.get(t['url'])]
+    # 收集已選取的
+    final_selection = [t for t in st.session_state.audio_tasks if st.session_state.get(f"chk_{t['url']}", False)]
 
     st.write("---")
-    if st.button(f"🚀 2. 批次處理並打包 ({len(final_selection)} 個)"):
+    if st.button(f"🚀 2. 開始下載優化 ({len(final_selection)} 個)"):
         if not final_selection:
-            st.warning("尚未選擇任何檔案！")
+            st.warning("沒選東西喔！")
         else:
             master_zip_io = io.BytesIO()
             with zipfile.ZipFile(master_zip_io, 'w') as master_zip:
                 p_bar = st.progress(0)
-                status = st.empty()
                 for i, task in enumerate(final_selection):
-                    status.text(f"正在後製: {task['folder']}/{task['file']}")
                     try:
                         r = requests.get(task['url'], timeout=10)
                         if r.status_code == 200:
@@ -130,6 +136,5 @@ if st.session_state.audio_tasks:
                             master_zip.writestr(f"{task['folder']}/{task['file']}", processed)
                     except: pass
                     p_bar.progress((i + 1) / len(final_selection))
-                status.text("✅ 下載與優化完成！")
             
-            st.download_button("⬇️ 下載分類優化包", master_zip_io.getvalue(), f"{user_id}_Categorized.zip")
+            st.download_button("⬇️ 下載分類優化包", master_zip_io.getvalue(), f"{user_id}_Fixed.zip")
