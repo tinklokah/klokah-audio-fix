@@ -3,71 +3,66 @@ import requests
 import io
 import os
 import zipfile
-import subprocess
 import librosa
 import soundfile as sf
 import noisereduce as nr
-import time
 from pydub import AudioSegment, effects
 from pydub.silence import detect_nonsilent
 
-# --- 核心優化：移植自 audio_bot_gui.py 的專業邏輯 ---
-def process_audio_pro(audio_bytes, filename):
-    timestamp = int(time.time() * 1000)
-    temp_input = f"temp_in_{timestamp}.mp3"
-    temp_norm = f"temp_norm_{timestamp}.wav"
-    temp_clean = f"temp_clean_{timestamp}.wav"
-    
+# --- 核心優化：純 Python 專業級音平衡 ---
+def process_audio_pure_python(audio_bytes, target_dBFS=-18.0):
     try:
-        # 儲存原始檔案以供 FFmpeg 讀取
-        with open(temp_input, "wb") as f:
-            f.write(audio_bytes)
-
-        # 1. 執行 loudnorm (建立厚度與基本響度)
-        # 比照原程式：I=-18 (響度), TP=-6 (峰值), LRA=3 (厚實感)
-        cmd = [
-            "ffmpeg", "-y", "-i", temp_input,
-            "-af", "loudnorm=I=-18:TP=-6:LRA=3", 
-            "-ar", "44100", temp_norm
-        ]
-        # 注意：Streamlit 雲端環境需有 ffmpeg，如果是本地執行請確保路徑正確
-        subprocess.run(cmd, check=True, capture_output=True)
-
-        # 2. AI 降噪 (移植原程式參數: 0.75)
-        y, sr = librosa.load(temp_norm, sr=None)
-        reduced_noise = nr.reduce_noise(y=y, sr=sr, prop_decrease=0.75)
-        sf.write(temp_clean, reduced_noise, sr)
-
-        # 3. 讀入 Pydub 進行「強制峰值調整」與「去頭尾」
-        audio = AudioSegment.from_wav(temp_clean)
+        # 1. 讀入音檔並初步降噪
+        audio = AudioSegment.from_file(io.BytesIO(audio_bytes))
         
-        # 強制最高峰推到 -6dB (headroom=6.0)
-        audio = effects.normalize(audio, headroom=6.0)
+        # 轉 wav 供 librosa 降噪 (降噪參數移植 0.75)
+        wav_io = io.BytesIO()
+        audio.export(wav_io, format="wav")
+        wav_io.seek(0)
+        y, sr = librosa.load(wav_io, sr=None)
+        reduced = nr.reduce_noise(y=y, sr=sr, prop_decrease=0.75)
+        
+        # 轉回 pydub
+        tmp_io = io.BytesIO()
+        sf.write(tmp_io, reduced, sr, format='WAV')
+        tmp_io.seek(0)
+        audio = AudioSegment.from_wav(tmp_io)
 
-        # 4. 去頭尾裁切 (原程式參數：前後保留 200ms)
+        # 2. 去頭尾靜音 (參數移植：前後保留 200ms)
         intervals = detect_nonsilent(audio, min_silence_len=300, silence_thresh=-45)
         if intervals:
             start_trim = max(0, intervals[0][0] - 200)
             end_trim = min(len(audio), intervals[-1][1] + 200)
             audio = audio[start_trim:end_trim]
 
-        # 5. 輸出轉為 Bytes
+        # 3. 【關鍵】模擬 Loudnorm 的音平衡
+        # A. RMS 響度匹配：將「平均體感音量」對齊到 -18 dBFS
+        change_in_dBFS = target_dBFS - audio.dBFS
+        audio = audio.apply_gain(change_in_dBFS)
+        
+        # B. 動態壓縮 (Compressor)：這是讓聲音變「厚實」的關鍵
+        # 壓縮太大的波峰，讓小聲的細節浮現
+        audio = audio.compress_dynamic_range(
+            threshold=-16.0, # 低於 -16dB 的聲音會被壓縮
+            ratio=3.0,       # 壓縮比
+            attack=5.0,      # 反應速度 (ms)
+            release=50.0     # 釋放速度 (ms)
+        )
+
+        # 4. 【強制峰值】推至 -6dB 
+        # 使用 pydub 的 normalize 並設定 headroom 為 6.0，確保最高點就在 -6dB
+        audio = effects.normalize(audio, headroom=6.0)
+
+        # 5. 輸出
         out_io = io.BytesIO()
         audio.export(out_io, format="mp3", bitrate="192k")
         return out_io.getvalue()
-
     except Exception as e:
-        st.error(f"處理失敗 ({filename}): {e}")
         return audio_bytes
-    finally:
-        # 清理暫存檔
-        for t in [temp_input, temp_norm, temp_clean]:
-            if os.path.exists(t):
-                os.remove(t)
 
-# --- 網頁介面 (保持原本的 API 抓取與分類邏輯) ---
-st.set_page_config(page_title="族語 AI 專業版", page_icon="🎙️", layout="wide")
-st.title("🎙️ 族語全自動：AI 專業處理版 (v3.6 核心移植)")
+# --- 網頁介面 (與之前相同) ---
+st.set_page_config(page_title="族語 AI 優化 (免FFmpeg版)", page_icon="⚖️", layout="wide")
+st.title("⚖️ 族語全自動：純 Python 專業音平衡版")
 
 user_id = st.text_input("輸入帳號 ID", value="picex11301")
 
@@ -93,26 +88,26 @@ if st.button("🔍 1. 抓取清單"):
                 for i in obj: scan(i)
         scan(data)
         st.session_state.audio_tasks = tasks
-        st.success(f"找到 {len(tasks)} 個檔案，已就緒。")
-    except: st.error("連線 API 失敗")
+        st.success(f"找到 {len(tasks)} 個音檔。")
+    except: st.error("API 連線失敗")
 
-# --- 選擇與批次處理 ---
 if st.session_state.audio_tasks:
     grouped = {}
     for t in st.session_state.audio_tasks: grouped.setdefault(t['folder'], []).append(t)
     
     st.write("---")
-    c_g1, c_g2, _ = st.columns([1, 1, 8])
-    if c_g1.button("🌐 全部全選"):
+    # 全域控制
+    col_g1, col_g2, _ = st.columns([1, 1, 8])
+    if col_g1.button("🌐 全部全選"):
         for t in st.session_state.audio_tasks: st.session_state[f"chk_{t['url']}"] = True
         st.rerun()
-    if c_g2.button("🌐 全部取消"):
+    if col_g2.button("🌐 全部取消"):
         for t in st.session_state.audio_tasks: st.session_state[f"chk_{t['url']}"] = False
         st.rerun()
 
     for folder in sorted(grouped.keys()):
         items = grouped[folder]
-        with st.expander(f"📁 資料夾: {folder} ({len(items)} 個)", expanded=True):
+        with st.expander(f"📁 資料夾: {folder} ({len(items)})", expanded=True):
             c1, c2, _ = st.columns([1, 1, 8])
             if c1.button(f"全選 {folder}", key=f"all_{folder}"):
                 for item in items: st.session_state[f"chk_{item['url']}"] = True
@@ -128,20 +123,21 @@ if st.session_state.audio_tasks:
 
     final_selection = [t for t in st.session_state.audio_tasks if st.session_state.get(f"chk_{t['url']}", False)]
 
-    if st.button(f"🚀 2. 執行 AI 專業後製 ({len(final_selection)} 個)"):
+    if st.button(f"🚀 2. 執行深度平衡處理 ({len(final_selection)} 個)"):
         master_zip_io = io.BytesIO()
         with zipfile.ZipFile(master_zip_io, 'w') as master_zip:
             p_bar = st.progress(0)
             st_text = st.empty()
             for i, task in enumerate(final_selection):
-                st_text.text(f"正在進行專業後製: {task['file']}")
+                st_text.text(f"處理中: {task['file']}")
                 try:
                     r = requests.get(task['url'], timeout=10)
                     if r.status_code == 200:
-                        processed = process_audio_pro(r.content, task['file'])
+                        # 執行純 Python 專業處理
+                        processed = process_audio_pure_python(r.content)
                         master_zip.writestr(f"{task['folder']}/{task['file']}", processed)
                 except: pass
                 p_bar.progress((i + 1) / len(final_selection))
-            st_text.text("✨ AI 處理與音量平衡完成！")
+            st_text.text("✨ 處理完成！")
         
-        st.download_button("⬇️ 下載專業版分類包", master_zip_io.getvalue(), f"{user_id}_Pro_Fixed.zip")
+        st.download_button("⬇️ 下載深度平衡分類包", master_zip_io.getvalue(), f"{user_id}_DeepBalanced.zip")
