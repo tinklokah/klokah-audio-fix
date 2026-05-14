@@ -9,17 +9,18 @@ import soundfile as sf
 from pydub import AudioSegment
 from pydub.silence import detect_nonsilent
 
-# --- 核心引擎：極致波形填平 (將小聲部分強行拉大) ---
-def process_audio_extreme_level(audio_bytes):
+# --- 核心引擎：純淨平衡 (減少沙沙聲，維持適度波形) ---
+def process_audio_clean_balanced(audio_bytes):
     try:
         audio = AudioSegment.from_file(io.BytesIO(audio_bytes))
         
-        # 1. 基礎降噪
+        # 1. 基礎降噪 (適度強度，避免聲音太假)
         wav_io = io.BytesIO()
         audio.export(wav_io, format="wav")
         wav_io.seek(0)
         y, sr = librosa.load(wav_io, sr=None)
-        reduced = nr.reduce_noise(y=y, sr=sr, prop_decrease=0.80)
+        # 調回 0.70，兼顧降噪與人聲自然度
+        reduced = nr.reduce_noise(y=y, sr=sr, prop_decrease=0.70)
         
         tmp_io = io.BytesIO()
         sf.write(tmp_io, reduced, sr, format='WAV')
@@ -31,22 +32,22 @@ def process_audio_extreme_level(audio_bytes):
         if intervals:
             audio = audio[max(0, intervals[0][0]-200) : min(len(audio), intervals[-1][1]+200)]
 
-        # 3. 【關鍵修正】極致壓縮器
-        # 我們把 Threshold 調得非常低 (-32dB)，讓小聲的部分也被壓縮器「抓到」
-        # Ratio 調到 12.0，這會把大聲跟小聲的比例縮到極小
+        # 3. 溫和壓縮器
+        # Threshold 調高一點點 (-28dB)，讓壓縮器不要對背景雜訊太敏感
+        # Ratio 降到 4.0，讓聲音聽起來更自然，不那麼扁
         audio = audio.compress_dynamic_range(
-            threshold=-32.0, 
-            ratio=12.0,      # 強力擠壓
+            threshold=-28.0, 
+            ratio=4.0,      
             attack=5.0, 
-            release=200.0    # 讓增益維持久一點，不讓小聲處掉下去
+            release=150.0   
         )
 
-        # 4. 【關鍵修正】補償增益
-        # 因為壓縮會讓整體變小聲，我們強行再拉大 20dB
-        audio = audio + 20 
+        # 4. 【關鍵修正】保守增益
+        # 從原本的 20 降到 10，大幅減少沙沙聲被放大的程度
+        audio = audio + 10 
 
-        # 5. 硬限制在 -6dB
-        # 所有的波峰都會在 -6dB 撞牆，剩下的空間會被小聲的聲音填滿
+        # 5. 標準化至 -6dB
+        # 雖然小聲的地方可能沒那麼「肥」，但整體聽感會乾淨很多
         audio = audio.normalize(headroom=6.0)
 
         out_io = io.BytesIO()
@@ -55,9 +56,9 @@ def process_audio_extreme_level(audio_bytes):
     except Exception as e:
         return audio_bytes
 
-# --- Streamlit 介面設定 ---
-st.set_page_config(page_title="音檔後製專家", layout="wide")
-st.title("🎙️ 族語全自動：音檔後製版")
+# --- Streamlit 介面邏輯 (延用穩定分類架構) ---
+st.set_page_config(page_title="族語純淨音質版", layout="wide")
+st.title("🎙️ 族語全自動：純淨平衡版 (減少背景沙沙聲)")
 
 if 'audio_tasks' not in st.session_state:
     st.session_state.audio_tasks = []
@@ -110,7 +111,7 @@ if st.session_state.audio_tasks:
 
     final_selection = [t for t in st.session_state.audio_tasks if t['child'] in st.session_state.selected_folders]
     st.write("---")
-    if st.button(f"🚀 2. 執行極致填平處理 ({len(final_selection)} 檔)"):
+    if st.button(f"🚀 2. 執行純淨平衡處理 ({len(final_selection)} 檔)"):
         if not final_selection: st.warning("請先選取資料夾。")
         else:
             zip_io = io.BytesIO()
@@ -120,8 +121,8 @@ if st.session_state.audio_tasks:
                     try:
                         r = requests.get(task['url'], timeout=10)
                         if r.status_code == 200:
-                            processed = process_audio_extreme_level(r.content)
+                            processed = process_audio_clean_balanced(r.content)
                             mz.writestr(f"{task['parent']}/{task['child']}/{task['file']}", processed)
                     except: pass
                     p_bar.progress((i + 1) / len(final_selection))
-            st.download_button("⬇️ 下載後製完成音檔", zip_io.getvalue(), f"{user_id}_Extreme_Balanced.zip")
+            st.download_button("⬇️ 下載純淨平衡包", zip_io.getvalue(), f"{user_id}_Clean_Balanced.zip")
